@@ -1,0 +1,195 @@
+name: Build and Release Latest
+
+on:
+  push:
+    branches:
+      - "**"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  BIN_NAME: gpt-image-2
+  RELEASE_TAG: latest
+
+jobs:
+  metadata:
+    name: Read package version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read Cargo package version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(awk -F '"' '/^version = / { print $2; exit }' Cargo.toml)"
+          if [[ -z "$version" ]]; then
+            echo "Could not read version from Cargo.toml" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.name }}
+    needs: metadata
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-latest
+            artifact: gpt-image-2-linux-x86_64
+            binary: target/release/gpt-image-2
+            archive_ext: tar.gz
+          - name: macos-arm64
+            os: macos-latest
+            artifact: gpt-image-2-macos-arm64
+            binary: target/release/gpt-image-2
+            archive_ext: tar.gz
+          - name: windows-x86_64
+            os: windows-latest
+            artifact: gpt-image-2-windows-x86_64
+            binary: target/release/gpt-image-2.exe
+            archive_ext: zip
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Package Unix binary
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          staging="${{ matrix.artifact }}"
+          archive="${BIN_NAME}-v${{ needs.metadata.outputs.version }}-${{ matrix.name }}.${{ matrix.archive_ext }}"
+          mkdir -p "$staging"
+          cp "${{ matrix.binary }}" "$staging/${BIN_NAME}"
+          chmod +x "$staging/${BIN_NAME}"
+          tar -czf "$archive" "$staging"
+
+      - name: Package Windows binary
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $staging = "${{ matrix.artifact }}"
+          $archive = "${env:BIN_NAME}-v${{ needs.metadata.outputs.version }}-${{ matrix.name }}.${{ matrix.archive_ext }}"
+          New-Item -ItemType Directory -Force -Path $staging | Out-Null
+          Copy-Item "${{ matrix.binary }}" "$staging/${env:BIN_NAME}.exe"
+          Compress-Archive -Path $staging -DestinationPath $archive -Force
+
+      - name: Upload binary archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ env.BIN_NAME }}-v${{ needs.metadata.outputs.version }}-${{ matrix.name }}.${{ matrix.archive_ext }}
+          if-no-files-found: error
+
+  package-skill:
+    name: Package skill
+    needs: metadata
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Package skill source
+        shell: bash
+        run: |
+          set -euo pipefail
+          staging="${BIN_NAME}"
+          archive="${BIN_NAME}-v${{ needs.metadata.outputs.version }}.tar.gz"
+
+          mkdir -p "$staging"
+          cp -R references "$staging/"
+          cp target/release/"${BIN_NAME}" "$staging/"
+          cp .env.example "$staging/"
+          cp SKILL.md "$staging/"
+          chmod +x "$staging/${BIN_NAME}"
+
+          tar -czf "$archive" "$staging"
+
+      - name: Upload skill archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: skill-package
+          path: ${{ env.BIN_NAME }}-v${{ needs.metadata.outputs.version }}.tar.gz
+          if-no-files-found: error
+
+  release:
+    name: Publish latest release
+    runs-on: ubuntu-latest
+    needs:
+      - metadata
+      - build
+      - package-skill
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download release assets
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Move latest tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          git tag -f "$RELEASE_TAG" "$GITHUB_SHA"
+          git push origin "refs/tags/$RELEASE_TAG" --force
+
+      - name: Publish GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          body_file="$(mktemp)"
+          {
+            echo "Automated latest build for v${{ needs.metadata.outputs.version }} at ${GITHUB_SHA}."
+            echo
+            echo "Assets include platform binaries and the packaged Codex skill source."
+          } > "$body_file"
+
+          gh release delete "$RELEASE_TAG" --yes --cleanup-tag || true
+          git push origin "refs/tags/$RELEASE_TAG" --force
+          gh release create "$RELEASE_TAG" dist/* \
+            --title "Latest build v${{ needs.metadata.outputs.version }}" \
+            --notes-file "$body_file" \
+            --latest
