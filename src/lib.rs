@@ -1667,8 +1667,8 @@ mod tests {
         assert_eq!(
             build_output_paths(&options, 2).unwrap(),
             vec![
-                temp_dir.path().join("batch/image_1.png"),
-                temp_dir.path().join("batch/image_2.png")
+                temp_dir.path().join("batch").join("image_1.png"),
+                temp_dir.path().join("batch").join("image_2.png")
             ]
         );
     }
@@ -1778,12 +1778,14 @@ mod tests {
             vec![
                 temp_dir
                     .path()
-                    .join("out/001-a-cat-1.webp")
+                    .join("out")
+                    .join("001-a-cat-1.webp")
                     .to_string_lossy()
                     .to_string(),
                 temp_dir
                     .path()
-                    .join("out/001-a-cat-2.webp")
+                    .join("out")
+                    .join("001-a-cat-2.webp")
                     .to_string_lossy()
                     .to_string()
             ]
